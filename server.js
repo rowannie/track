@@ -1,426 +1,652 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const mongoose = require('mongoose');
-const axios = require('axios');
-const cheerio = require('cheerio');
-const path = require('path');
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Database Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/track', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log('MongoDB connected successfully'))
-.catch(err => console.error('MongoDB connection error:', err));
+// Mock database (replace with actual database)
+const products = [];
+const variants = [];
+const orders = [];
+const dashboardMetrics = {
+  totalProducts: 0,
+  totalVariants: 0,
+  totalOrders: 0,
+  totalRevenue: 0,
+  recentOrders: [],
+  topProducts: []
+};
 
-// MongoDB Schemas and Models
-const itemSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  url: { type: String, required: true },
-  price: { type: Number },
-  priceHistory: [{
-    price: Number,
-    date: { type: Date, default: Date.now }
-  }],
-  category: String,
-  description: String,
-  lastScraped: { type: Date, default: Date.now },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-const notificationSchema = new mongoose.Schema({
-  itemId: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
-  type: { type: String, enum: ['price_drop', 'price_increase', 'back_in_stock'], required: true },
-  message: String,
-  threshold: Number,
-  isRead: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now }
-});
-
-const Item = mongoose.model('Item', itemSchema);
-const Notification = mongoose.model('Notification', notificationSchema);
-
-// Utility Functions
+// ==================== Product Scraping Endpoints ====================
 
 /**
- * Scrape product information from URL
- * @param {string} url - The URL to scrape
- * @returns {Promise<Object>} - Scraped data (title, price, description)
+ * POST /api/products/scrape
+ * Scrapes products from a given source URL
  */
-async function scrapeWebsite(url) {
+app.post('/api/products/scrape', async (req, res) => {
   try {
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    const { sourceUrl, productData } = req.body;
+
+    if (!sourceUrl || !productData) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: sourceUrl and productData'
+      });
+    }
+
+    // Validate product data structure
+    const validatedProduct = {
+      id: productData.id || Date.now().toString(),
+      name: productData.name,
+      description: productData.description || '',
+      price: parseFloat(productData.price) || 0,
+      category: productData.category || 'Uncategorized',
+      sourceUrl: sourceUrl,
+      imageUrl: productData.imageUrl || null,
+      sku: productData.sku || null,
+      stock: parseInt(productData.stock) || 0,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    products.push(validatedProduct);
+    dashboardMetrics.totalProducts = products.length;
+
+    res.status(201).json({
+      success: true,
+      message: 'Product scraped successfully',
+      data: validatedProduct
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error scraping product',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/products
+ * Retrieves all scraped products with optional filtering
+ */
+app.get('/api/products', (req, res) => {
+  try {
+    const { category, minPrice, maxPrice, search } = req.query;
+
+    let filteredProducts = [...products];
+
+    // Apply filters
+    if (category) {
+      filteredProducts = filteredProducts.filter(p => p.category === category);
+    }
+
+    if (minPrice) {
+      filteredProducts = filteredProducts.filter(p => p.price >= parseFloat(minPrice));
+    }
+
+    if (maxPrice) {
+      filteredProducts = filteredProducts.filter(p => p.price <= parseFloat(maxPrice));
+    }
+
+    if (search) {
+      const searchLower = search.toLowerCase();
+      filteredProducts = filteredProducts.filter(p =>
+        p.name.toLowerCase().includes(searchLower) ||
+        p.description.toLowerCase().includes(searchLower)
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      data: filteredProducts,
+      total: filteredProducts.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching products',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/products/:id
+ * Retrieves a single product by ID
+ */
+app.get('/api/products/:id', (req, res) => {
+  try {
+    const product = products.find(p => p.id === req.params.id);
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: product
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching product',
+      error: error.message
+    });
+  }
+});
+
+// ==================== Variant Management Endpoints ====================
+
+/**
+ * POST /api/variants
+ * Creates a new product variant
+ */
+app.post('/api/variants', (req, res) => {
+  try {
+    const { productId, type, value, price, stock } = req.body;
+
+    if (!productId || !type || !value) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: productId, type, and value'
+      });
+    }
+
+    const product = products.find(p => p.id === productId);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const variant = {
+      id: `variant_${Date.now()}`,
+      productId: productId,
+      type: type, // e.g., 'size', 'color', 'material'
+      value: value,
+      price: price ? parseFloat(price) : product.price,
+      stock: stock ? parseInt(stock) : product.stock,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    variants.push(variant);
+    dashboardMetrics.totalVariants = variants.length;
+
+    res.status(201).json({
+      success: true,
+      message: 'Variant created successfully',
+      data: variant
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error creating variant',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/variants
+ * Retrieves all variants with optional product filtering
+ */
+app.get('/api/variants', (req, res) => {
+  try {
+    const { productId, type } = req.query;
+
+    let filteredVariants = [...variants];
+
+    if (productId) {
+      filteredVariants = filteredVariants.filter(v => v.productId === productId);
+    }
+
+    if (type) {
+      filteredVariants = filteredVariants.filter(v => v.type === type);
+    }
+
+    res.status(200).json({
+      success: true,
+      data: filteredVariants,
+      total: filteredVariants.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching variants',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * PUT /api/variants/:id
+ * Updates a variant
+ */
+app.put('/api/variants/:id', (req, res) => {
+  try {
+    const { price, stock, value } = req.body;
+    const variant = variants.find(v => v.id === req.params.id);
+
+    if (!variant) {
+      return res.status(404).json({
+        success: false,
+        message: 'Variant not found'
+      });
+    }
+
+    if (price !== undefined) variant.price = parseFloat(price);
+    if (stock !== undefined) variant.stock = parseInt(stock);
+    if (value !== undefined) variant.value = value;
+    variant.updatedAt = new Date();
+
+    res.status(200).json({
+      success: true,
+      message: 'Variant updated successfully',
+      data: variant
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error updating variant',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/variants/:id
+ * Deletes a variant
+ */
+app.delete('/api/variants/:id', (req, res) => {
+  try {
+    const index = variants.findIndex(v => v.id === req.params.id);
+
+    if (index === -1) {
+      return res.status(404).json({
+        success: false,
+        message: 'Variant not found'
+      });
+    }
+
+    const deletedVariant = variants.splice(index, 1);
+    dashboardMetrics.totalVariants = variants.length;
+
+    res.status(200).json({
+      success: true,
+      message: 'Variant deleted successfully',
+      data: deletedVariant[0]
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting variant',
+      error: error.message
+    });
+  }
+});
+
+// ==================== Order Tracking Endpoints ====================
+
+/**
+ * POST /api/orders
+ * Creates a new order
+ */
+app.post('/api/orders', (req, res) => {
+  try {
+    const { productId, variantId, quantity, customerEmail, customerName, totalPrice } = req.body;
+
+    if (!productId || !quantity || !customerEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: productId, quantity, and customerEmail'
+      });
+    }
+
+    const product = products.find(p => p.id === productId);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const order = {
+      id: `order_${Date.now()}`,
+      productId: productId,
+      variantId: variantId || null,
+      quantity: parseInt(quantity),
+      customerEmail: customerEmail,
+      customerName: customerName || 'Guest',
+      totalPrice: totalPrice ? parseFloat(totalPrice) : product.price * quantity,
+      status: 'pending', // pending, processing, shipped, delivered, cancelled
+      shippingAddress: null,
+      trackingNumber: null,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    orders.push(order);
+    dashboardMetrics.totalOrders = orders.length;
+    dashboardMetrics.totalRevenue += order.totalPrice;
+    dashboardMetrics.recentOrders.unshift(order);
+    if (dashboardMetrics.recentOrders.length > 10) {
+      dashboardMetrics.recentOrders.pop();
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Order created successfully',
+      data: order
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error creating order',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/orders
+ * Retrieves all orders with optional filtering
+ */
+app.get('/api/orders', (req, res) => {
+  try {
+    const { status, customerEmail, productId } = req.query;
+
+    let filteredOrders = [...orders];
+
+    if (status) {
+      filteredOrders = filteredOrders.filter(o => o.status === status);
+    }
+
+    if (customerEmail) {
+      filteredOrders = filteredOrders.filter(o => o.customerEmail === customerEmail);
+    }
+
+    if (productId) {
+      filteredOrders = filteredOrders.filter(o => o.productId === productId);
+    }
+
+    res.status(200).json({
+      success: true,
+      data: filteredOrders,
+      total: filteredOrders.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching orders',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/orders/:id
+ * Retrieves a single order by ID
+ */
+app.get('/api/orders/:id', (req, res) => {
+  try {
+    const order = orders.find(o => o.id === req.params.id);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: order
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching order',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * PUT /api/orders/:id
+ * Updates an order (status, tracking, shipping address)
+ */
+app.put('/api/orders/:id', (req, res) => {
+  try {
+    const { status, trackingNumber, shippingAddress } = req.body;
+    const order = orders.find(o => o.id === req.params.id);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    if (status) order.status = status;
+    if (trackingNumber) order.trackingNumber = trackingNumber;
+    if (shippingAddress) order.shippingAddress = shippingAddress;
+    order.updatedAt = new Date();
+
+    res.status(200).json({
+      success: true,
+      message: 'Order updated successfully',
+      data: order
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error updating order',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/orders/:id
+ * Cancels/deletes an order
+ */
+app.delete('/api/orders/:id', (req, res) => {
+  try {
+    const index = orders.findIndex(o => o.id === req.params.id);
+
+    if (index === -1) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    const deletedOrder = orders.splice(index, 1)[0];
+    dashboardMetrics.totalOrders = orders.length;
+    dashboardMetrics.totalRevenue -= deletedOrder.totalPrice;
+
+    res.status(200).json({
+      success: true,
+      message: 'Order deleted successfully',
+      data: deletedOrder
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting order',
+      error: error.message
+    });
+  }
+});
+
+// ==================== Dashboard Endpoints ====================
+
+/**
+ * GET /api/dashboard
+ * Retrieves comprehensive dashboard data and metrics
+ */
+app.get('/api/dashboard', (req, res) => {
+  try {
+    // Calculate additional metrics
+    const orderStatuses = {
+      pending: orders.filter(o => o.status === 'pending').length,
+      processing: orders.filter(o => o.status === 'processing').length,
+      shipped: orders.filter(o => o.status === 'shipped').length,
+      delivered: orders.filter(o => o.status === 'delivered').length,
+      cancelled: orders.filter(o => o.status === 'cancelled').length
+    };
+
+    // Get top products by order count
+    const productOrderCounts = {};
+    orders.forEach(order => {
+      productOrderCounts[order.productId] = (productOrderCounts[order.productId] || 0) + order.quantity;
+    });
+
+    const topProducts = Object.entries(productOrderCounts)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5)
+      .map(([productId, count]) => {
+        const product = products.find(p => p.id === productId);
+        return {
+          productId,
+          name: product?.name || 'Unknown',
+          orderCount: count
+        };
+      });
+
+    const dashboard = {
+      summary: {
+        totalProducts: dashboardMetrics.totalProducts,
+        totalVariants: dashboardMetrics.totalVariants,
+        totalOrders: dashboardMetrics.totalOrders,
+        totalRevenue: dashboardMetrics.totalRevenue.toFixed(2)
       },
-      timeout: 10000
-    });
-
-    const $ = cheerio.load(response.data);
-    
-    // Generic selectors - can be customized per site
-    const title = $('h1').first().text() || $('title').text() || 'Unknown Product';
-    const price = extractPrice($('body').text());
-    const description = $('meta[name="description"]').attr('content') || '';
-
-    return {
-      name: title.trim(),
-      price,
-      description: description.trim()
+      orderStatuses: orderStatuses,
+      topProducts: topProducts,
+      recentOrders: dashboardMetrics.recentOrders.slice(0, 10),
+      averageOrderValue: dashboardMetrics.totalOrders > 0
+        ? (dashboardMetrics.totalRevenue / dashboardMetrics.totalOrders).toFixed(2)
+        : 0,
+      lastUpdated: new Date()
     };
-  } catch (error) {
-    console.error(`Error scraping ${url}:`, error.message);
-    return {
-      name: 'Error',
-      price: null,
-      description: 'Failed to scrape content'
-    };
-  }
-}
 
-/**
- * Extract price from text using regex
- * @param {string} text - Text containing price
- * @returns {number|null} - Extracted price or null
- */
-function extractPrice(text) {
-  const priceMatch = text.match(/\$\s*(\d+(?:\.\d{2})?)/);
-  return priceMatch ? parseFloat(priceMatch[1]) : null;
-}
-
-/**
- * Check for price changes and create notifications
- * @param {Object} item - The item document
- * @param {number} currentPrice - Current scraped price
- */
-async function checkPriceChanges(item, currentPrice) {
-  if (!currentPrice || !item.price) return;
-
-  const priceDifference = currentPrice - item.price;
-  const percentChange = (Math.abs(priceDifference) / item.price) * 100;
-
-  // Create notification if price changed by more than 1%
-  if (percentChange > 1) {
-    const notificationType = priceDifference < 0 ? 'price_drop' : 'price_increase';
-    const message = `Price ${notificationType === 'price_drop' ? 'dropped' : 'increased'} from $${item.price} to $${currentPrice}`;
-
-    await Notification.create({
-      itemId: item._id,
-      type: notificationType,
-      message,
-      threshold: item.price
-    });
-  }
-}
-
-// API Routes
-
-/**
- * GET /api/health
- * Health check endpoint
- */
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
-});
-
-/**
- * POST /api/items
- * Create a new item to track
- */
-app.post('/api/items', async (req, res) => {
-  try {
-    const { name, url, category } = req.body;
-
-    if (!name || !url) {
-      return res.status(400).json({ error: 'Name and URL are required' });
-    }
-
-    // Scrape initial data
-    const scrapedData = await scrapeWebsite(url);
-
-    const item = new Item({
-      name: scrapedData.name || name,
-      url,
-      price: scrapedData.price,
-      description: scrapedData.description,
-      category: category || 'Uncategorized',
-      priceHistory: scrapedData.price ? [{ price: scrapedData.price }] : []
-    });
-
-    await item.save();
-    res.status(201).json(item);
-  } catch (error) {
-    console.error('Error creating item:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/items
- * Retrieve all tracked items
- */
-app.get('/api/items', async (req, res) => {
-  try {
-    const items = await Item.find().sort({ createdAt: -1 });
-    res.json(items);
-  } catch (error) {
-    console.error('Error fetching items:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/items/:id
- * Retrieve a specific item by ID
- */
-app.get('/api/items/:id', async (req, res) => {
-  try {
-    const item = await Item.findById(req.params.id);
-    if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
-    }
-    res.json(item);
-  } catch (error) {
-    console.error('Error fetching item:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * PUT /api/items/:id
- * Update an item
- */
-app.put('/api/items/:id', async (req, res) => {
-  try {
-    const { name, url, category } = req.body;
-    const item = await Item.findByIdAndUpdate(
-      req.params.id,
-      { name, url, category, updatedAt: new Date() },
-      { new: true, runValidators: true }
-    );
-
-    if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
-    }
-    res.json(item);
-  } catch (error) {
-    console.error('Error updating item:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * DELETE /api/items/:id
- * Delete an item
- */
-app.delete('/api/items/:id', async (req, res) => {
-  try {
-    const item = await Item.findByIdAndDelete(req.params.id);
-    if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
-    }
-    res.json({ message: 'Item deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting item:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * POST /api/items/:id/scrape
- * Manually trigger scraping for a specific item
- */
-app.post('/api/items/:id/scrape', async (req, res) => {
-  try {
-    const item = await Item.findById(req.params.id);
-    if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
-    }
-
-    const scrapedData = await scrapeWebsite(item.url);
-    
-    if (scrapedData.price) {
-      // Check for price changes
-      await checkPriceChanges(item, scrapedData.price);
-
-      // Update price history
-      item.priceHistory.push({ price: scrapedData.price });
-      item.price = scrapedData.price;
-    }
-
-    item.lastScraped = new Date();
-    await item.save();
-
-    res.json({
-      message: 'Scraping completed',
-      item
+    res.status(200).json({
+      success: true,
+      data: dashboard
     });
   } catch (error) {
-    console.error('Error scraping item:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching dashboard data',
+      error: error.message
+    });
   }
 });
 
 /**
- * POST /api/scrape-all
- * Scrape all items in the database
+ * GET /api/dashboard/stats
+ * Retrieves detailed statistics
  */
-app.post('/api/scrape-all', async (req, res) => {
+app.get('/api/dashboard/stats', (req, res) => {
   try {
-    const items = await Item.find();
-    const results = [];
-
-    for (const item of items) {
-      const scrapedData = await scrapeWebsite(item.url);
-      
-      if (scrapedData.price) {
-        await checkPriceChanges(item, scrapedData.price);
-        item.priceHistory.push({ price: scrapedData.price });
-        item.price = scrapedData.price;
+    const stats = {
+      products: {
+        total: products.length,
+        byCategory: {}
+      },
+      variants: {
+        total: variants.length,
+        byType: {}
+      },
+      orders: {
+        total: orders.length,
+        byStatus: {},
+        totalValue: dashboardMetrics.totalRevenue
       }
+    };
 
-      item.lastScraped = new Date();
-      await item.save();
-      results.push({ id: item._id, status: 'success' });
-    }
-
-    res.json({
-      message: 'Batch scraping completed',
-      results,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('Error batch scraping:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/notifications
- * Retrieve all notifications
- */
-app.get('/api/notifications', async (req, res) => {
-  try {
-    const unreadOnly = req.query.unread === 'true';
-    const query = unreadOnly ? { isRead: false } : {};
-    const notifications = await Notification.find(query)
-      .populate('itemId')
-      .sort({ createdAt: -1 });
-    res.json(notifications);
-  } catch (error) {
-    console.error('Error fetching notifications:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * PATCH /api/notifications/:id/read
- * Mark a notification as read
- */
-app.patch('/api/notifications/:id/read', async (req, res) => {
-  try {
-    const notification = await Notification.findByIdAndUpdate(
-      req.params.id,
-      { isRead: true },
-      { new: true }
-    );
-
-    if (!notification) {
-      return res.status(404).json({ error: 'Notification not found' });
-    }
-    res.json(notification);
-  } catch (error) {
-    console.error('Error updating notification:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/items/:id/price-history
- * Get price history for an item
- */
-app.get('/api/items/:id/price-history', async (req, res) => {
-  try {
-    const item = await Item.findById(req.params.id);
-    if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
-    }
-
-    res.json({
-      itemId: item._id,
-      name: item.name,
-      priceHistory: item.priceHistory
-    });
-  } catch (error) {
-    console.error('Error fetching price history:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/stats
- * Get statistics about tracked items
- */
-app.get('/api/stats', async (req, res) => {
-  try {
-    const totalItems = await Item.countDocuments();
-    const avgPrice = await Item.aggregate([
-      { $match: { price: { $exists: true, $ne: null } } },
-      { $group: { _id: null, avgPrice: { $avg: '$price' } } }
-    ]);
-
-    const recentNotifications = await Notification.countDocuments({
-      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    // Count by category
+    products.forEach(p => {
+      stats.products.byCategory[p.category] = (stats.products.byCategory[p.category] || 0) + 1;
     });
 
-    res.json({
-      totalItems,
-      averagePrice: avgPrice[0]?.avgPrice || 0,
-      recentNotifications,
-      timestamp: new Date().toISOString()
+    // Count variants by type
+    variants.forEach(v => {
+      stats.variants.byType[v.type] = (stats.variants.byType[v.type] || 0) + 1;
+    });
+
+    // Count orders by status
+    orders.forEach(o => {
+      stats.orders.byStatus[o.status] = (stats.orders.byStatus[o.status] || 0) + 1;
+    });
+
+    res.status(200).json({
+      success: true,
+      data: stats
     });
   } catch (error) {
-    console.error('Error fetching stats:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching statistics',
+      error: error.message
+    });
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+// ==================== Health Check ====================
+
+/**
+ * GET /health
+ * Simple health check endpoint
+ */
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'Server is running',
+    timestamp: new Date()
   });
 });
 
-// 404 handler
+// ==================== 404 Handler ====================
+
 app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
+  res.status(404).json({
+    success: false,
+    message: 'Route not found'
+  });
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
+// ==================== Error Handler ====================
+
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred'
+  });
+});
+
+// ==================== Start Server ====================
+
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Started at: ${new Date().toISOString()}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`📊 API endpoints available at http://localhost:${PORT}/api`);
+  console.log(`💚 Health check: http://localhost:${PORT}/health`);
 });
 
 module.exports = app;
