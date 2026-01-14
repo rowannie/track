@@ -1,9 +1,9 @@
-const puppeteer = require('puppeteer');
-
 /**
- * Puppeteer-based Web Scraper for kmonstar.org
- * Extracts product details including variants and inventory information
+ * Web Scraper for kmonstar.org
+ * Extracts product details, variants, stock levels, and orders using Puppeteer
  */
+
+const puppeteer = require('puppeteer');
 
 class KmonstarScraper {
   constructor(options = {}) {
@@ -21,24 +21,19 @@ class KmonstarScraper {
     try {
       this.browser = await puppeteer.launch({
         headless: this.headless,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage'
-        ]
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
       });
       this.page = await this.browser.newPage();
       this.page.setDefaultTimeout(this.timeout);
-      this.page.setDefaultNavigationTimeout(this.timeout);
       console.log('Browser initialized successfully');
     } catch (error) {
-      console.error('Failed to initialize browser:', error.message);
+      console.error('Failed to initialize browser:', error);
       throw error;
     }
   }
 
   /**
-   * Close browser instance
+   * Close browser and cleanup resources
    */
   async close() {
     if (this.browser) {
@@ -48,234 +43,265 @@ class KmonstarScraper {
   }
 
   /**
-   * Scrape product details from a product page
-   * @param {string} productUrl - URL of the product page
-   * @returns {object} Product details including variants and inventory
+   * Navigate to URL with retry logic
    */
-  async scrapeProduct(productUrl) {
-    try {
-      await this.page.goto(productUrl, { waitUntil: 'networkidle2' });
-      
-      const productData = await this.page.evaluate(() => {
-        const product = {
-          title: null,
-          price: null,
-          description: null,
-          imageUrl: null,
-          variants: [],
-          inventory: {
-            current: 0,
-            status: 'unknown'
-          },
-          rating: null,
-          url: window.location.href,
-          scrapedAt: new Date().toISOString()
-        };
-
-        // Extract product title
-        const titleElement = document.querySelector('h1.product-title, h1[itemprop="name"], .product-name');
-        if (titleElement) {
-          product.title = titleElement.textContent.trim();
-        }
-
-        // Extract price
-        const priceElement = document.querySelector('[itemprop="price"], .product-price, .price');
-        if (priceElement) {
-          const priceText = priceElement.textContent.match(/[\d,]+\.?\d*/);
-          product.price = priceText ? parseFloat(priceText[0].replace(/,/g, '')) : null;
-        }
-
-        // Extract description
-        const descElement = document.querySelector('[itemprop="description"], .product-description, .description');
-        if (descElement) {
-          product.description = descElement.textContent.trim();
-        }
-
-        // Extract main product image
-        const imageElement = document.querySelector('[itemprop="image"], .product-image img, .main-image img');
-        if (imageElement) {
-          product.imageUrl = imageElement.src || imageElement.getAttribute('data-src');
-        }
-
-        // Extract variants
-        const variantContainers = document.querySelectorAll('[data-variant], .variant, .product-variant');
-        if (variantContainers.length > 0) {
-          variantContainers.forEach(container => {
-            const variant = {
-              name: null,
-              value: null,
-              price: null,
-              inventory: 0
-            };
-
-            const nameElement = container.querySelector('[data-variant-name], .variant-name');
-            if (nameElement) {
-              variant.name = nameElement.textContent.trim();
-            }
-
-            const valueElement = container.querySelector('[data-variant-value], .variant-value');
-            if (valueElement) {
-              variant.value = valueElement.textContent.trim();
-            }
-
-            const priceElement = container.querySelector('.variant-price, [data-price]');
-            if (priceElement) {
-              const priceText = priceElement.textContent.match(/[\d,]+\.?\d*/);
-              variant.price = priceText ? parseFloat(priceText[0].replace(/,/g, '')) : null;
-            }
-
-            const inventoryElement = container.querySelector('[data-inventory], .inventory, .stock-count');
-            if (inventoryElement) {
-              const inventoryText = inventoryElement.textContent.match(/\d+/);
-              variant.inventory = inventoryText ? parseInt(inventoryText[0], 10) : 0;
-            }
-
-            if (variant.name || variant.value) {
-              product.variants.push(variant);
-            }
-          });
-        }
-
-        // Extract inventory information
-        const inventoryElement = document.querySelector('[itemprop="availability"], .inventory-count, .stock, [data-inventory-current]');
-        if (inventoryElement) {
-          const inventoryText = inventoryElement.textContent;
-          const inventoryMatch = inventoryText.match(/\d+/);
-          if (inventoryMatch) {
-            product.inventory.current = parseInt(inventoryMatch[0], 10);
-          }
-          
-          // Determine inventory status
-          if (inventoryText.toLowerCase().includes('out') || inventoryText.toLowerCase().includes('unavailable')) {
-            product.inventory.status = 'out-of-stock';
-          } else if (inventoryText.toLowerCase().includes('in stock') || product.inventory.current > 0) {
-            product.inventory.status = 'in-stock';
-          } else if (inventoryText.toLowerCase().includes('limited') || product.inventory.current < 5) {
-            product.inventory.status = 'limited';
-          }
-        }
-
-        // Extract rating if available
-        const ratingElement = document.querySelector('[itemprop="ratingValue"], .rating, .stars');
-        if (ratingElement) {
-          const ratingText = ratingElement.textContent.match(/[\d.]+/);
-          product.rating = ratingText ? parseFloat(ratingText[0]) : null;
-        }
-
-        return product;
-      });
-
-      console.log(`Successfully scraped product: ${productData.title}`);
-      return productData;
-    } catch (error) {
-      console.error(`Error scraping product at ${productUrl}:`, error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Scrape multiple products from a list/category page
-   * @param {string} listUrl - URL of the list/category page
-   * @returns {array} Array of product URLs found on the page
-   */
-  async scrapeProductList(listUrl) {
-    try {
-      await this.page.goto(listUrl, { waitUntil: 'networkidle2' });
-      
-      const productUrls = await this.page.evaluate((baseUrl) => {
-        const products = [];
-        const productLinks = document.querySelectorAll('a[href*="/product"], a[href*="/item"], .product-link');
-        
-        productLinks.forEach(link => {
-          const href = link.getAttribute('href');
-          if (href) {
-            const fullUrl = href.startsWith('http') ? href : new URL(href, baseUrl).href;
-            if (!products.includes(fullUrl)) {
-              products.push(fullUrl);
-            }
-          }
-        });
-        
-        return products;
-      }, this.baseUrl);
-
-      console.log(`Found ${productUrls.length} products on the list page`);
-      return productUrls;
-    } catch (error) {
-      console.error(`Error scraping product list at ${listUrl}:`, error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Scrape multiple products with delay between requests
-   * @param {array} productUrls - Array of product URLs to scrape
-   * @param {number} delayMs - Delay between requests in milliseconds
-   * @returns {array} Array of scraped product data
-   */
-  async scrapeMultipleProducts(productUrls, delayMs = 1000) {
-    const results = [];
-    
-    for (let i = 0; i < productUrls.length; i++) {
+  async navigateTo(url, retries = 3) {
+    for (let i = 0; i < retries; i++) {
       try {
-        console.log(`Scraping product ${i + 1}/${productUrls.length}`);
-        const productData = await this.scrapeProduct(productUrls[i]);
-        results.push(productData);
-        
-        if (i < productUrls.length - 1) {
-          await this.delay(delayMs);
-        }
+        await this.page.goto(url, { waitUntil: 'networkidle2' });
+        return true;
       } catch (error) {
-        console.error(`Failed to scrape ${productUrls[i]}:`, error.message);
-        results.push({
-          url: productUrls[i],
-          error: error.message,
-          scrapedAt: new Date().toISOString()
-        });
+        console.warn(`Navigation attempt ${i + 1} failed:`, error.message);
+        if (i === retries - 1) throw error;
+        await this.page.waitForTimeout(1000);
       }
     }
-    
-    return results;
   }
 
   /**
-   * Utility function to delay execution
-   * @param {number} ms - Milliseconds to delay
+   * Scrape all products from the catalog
    */
-  delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Wait for element to appear on page
-   * @param {string} selector - CSS selector of the element
-   * @param {number} timeout - Maximum time to wait in milliseconds
-   */
-  async waitForSelector(selector, timeout = 5000) {
+  async scrapeProducts(pageUrl = null) {
     try {
-      await this.page.waitForSelector(selector, { timeout });
-      return true;
+      const url = pageUrl || `${this.baseUrl}/products`;
+      await this.navigateTo(url);
+
+      // Wait for product elements to load
+      await this.page.waitForSelector('[data-product-id], .product-item', { timeout: 5000 }).catch(() => null);
+
+      const products = await this.page.evaluate(() => {
+        const productElements = document.querySelectorAll('[data-product-id], .product-item');
+        const products = [];
+
+        productElements.forEach(element => {
+          const product = {
+            id: element.getAttribute('data-product-id') || element.getAttribute('id'),
+            name: element.querySelector('h2, .product-name, .title')?.textContent?.trim() || '',
+            price: element.querySelector('[data-price], .price')?.textContent?.trim() || '',
+            description: element.querySelector('[data-description], .description, .product-description')?.textContent?.trim() || '',
+            url: element.querySelector('a')?.href || '',
+            image: element.querySelector('img')?.src || '',
+            sku: element.getAttribute('data-sku') || element.querySelector('[data-sku]')?.textContent?.trim() || ''
+          };
+          products.push(product);
+        });
+
+        return products;
+      });
+
+      console.log(`Scraped ${products.length} products`);
+      return products;
     } catch (error) {
-      console.warn(`Element ${selector} not found within ${timeout}ms`);
-      return false;
+      console.error('Error scraping products:', error);
+      throw error;
     }
   }
 
   /**
-   * Click element and wait for navigation/new page
-   * @param {string} selector - CSS selector of the element to click
+   * Scrape detailed information for a specific product
    */
-  async clickAndWait(selector) {
-    await this.page.click(selector);
-    await this.page.waitForNavigation({ waitUntil: 'networkidle2' });
+  async scrapeProductDetails(productUrl) {
+    try {
+      await this.navigateTo(productUrl);
+
+      const details = await this.page.evaluate(() => {
+        return {
+          title: document.querySelector('h1, .product-title')?.textContent?.trim() || '',
+          price: document.querySelector('[data-price], .product-price, .price')?.textContent?.trim() || '',
+          description: document.querySelector('[data-description], .product-description')?.textContent?.trim() || '',
+          sku: document.querySelector('[data-sku]')?.textContent?.trim() || '',
+          brand: document.querySelector('[data-brand], .brand')?.textContent?.trim() || '',
+          category: document.querySelector('[data-category], .category')?.textContent?.trim() || '',
+          rating: document.querySelector('[data-rating], .rating, .stars')?.textContent?.trim() || '',
+          reviews: document.querySelector('[data-reviews-count], .reviews-count')?.textContent?.trim() || '',
+          detailedDescription: document.querySelector('.detailed-description, [data-full-description]')?.textContent?.trim() || '',
+          weight: document.querySelector('[data-weight]')?.textContent?.trim() || '',
+          dimensions: document.querySelector('[data-dimensions]')?.textContent?.trim() || ''
+        };
+      });
+
+      console.log(`Scraped details for product: ${details.title}`);
+      return details;
+    } catch (error) {
+      console.error('Error scraping product details:', error);
+      throw error;
+    }
   }
 
   /**
-   * Set viewport size
-   * @param {object} viewport - Viewport dimensions {width, height}
+   * Scrape product variants (sizes, colors, etc.)
    */
-  async setViewport(viewport) {
-    await this.page.setViewport(viewport);
+  async scrapeVariants(productUrl) {
+    try {
+      await this.navigateTo(productUrl);
+
+      const variants = await this.page.evaluate(() => {
+        const variantElements = document.querySelectorAll('[data-variant], .variant-option, .size-option, .color-option');
+        const variants = [];
+
+        variantElements.forEach(element => {
+          const variant = {
+            id: element.getAttribute('data-variant-id') || element.getAttribute('data-value'),
+            name: element.getAttribute('data-variant-name') || element.textContent?.trim() || '',
+            value: element.getAttribute('data-value') || element.getAttribute('value') || '',
+            type: element.getAttribute('data-variant-type') || element.className.includes('color') ? 'color' : 'size',
+            price: element.getAttribute('data-price') || '',
+            available: !element.classList.contains('disabled') && !element.classList.contains('out-of-stock')
+          };
+          variants.push(variant);
+        });
+
+        return variants;
+      });
+
+      console.log(`Scraped ${variants.length} variants`);
+      return variants;
+    } catch (error) {
+      console.error('Error scraping variants:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Scrape stock levels for products
+   */
+  async scrapeStockLevels(productUrl) {
+    try {
+      await this.navigateTo(productUrl);
+
+      const stock = await this.page.evaluate(() => {
+        return {
+          overall: document.querySelector('[data-stock], .stock, .inventory')?.textContent?.trim() || '',
+          status: document.querySelector('[data-stock-status], .stock-status')?.textContent?.trim() || '',
+          quantity: document.querySelector('[data-quantity], .quantity')?.textContent?.trim() || '',
+          variantStock: Array.from(document.querySelectorAll('[data-variant-stock], .variant-stock')).map(el => ({
+            variant: el.getAttribute('data-variant-name') || el.textContent?.trim(),
+            quantity: el.getAttribute('data-quantity') || ''
+          })) || []
+        };
+      });
+
+      console.log(`Scraped stock information`);
+      return stock;
+    } catch (error) {
+      console.error('Error scraping stock levels:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Scrape order information (requires authentication)
+   */
+  async scrapeOrders(ordersUrl = null, loginRequired = false) {
+    try {
+      const url = ordersUrl || `${this.baseUrl}/orders`;
+      
+      if (loginRequired) {
+        console.log('Note: Order scraping may require authentication');
+      }
+
+      await this.navigateTo(url);
+
+      // Wait for order elements
+      await this.page.waitForSelector('[data-order-id], .order-item, .order-row', { timeout: 5000 }).catch(() => null);
+
+      const orders = await this.page.evaluate(() => {
+        const orderElements = document.querySelectorAll('[data-order-id], .order-item, .order-row');
+        const orders = [];
+
+        orderElements.forEach(element => {
+          const order = {
+            id: element.getAttribute('data-order-id') || element.querySelector('.order-id')?.textContent?.trim() || '',
+            date: element.getAttribute('data-order-date') || element.querySelector('[data-date], .order-date')?.textContent?.trim() || '',
+            status: element.getAttribute('data-status') || element.querySelector('[data-status], .status, .order-status')?.textContent?.trim() || '',
+            total: element.querySelector('[data-total], .total, .order-total')?.textContent?.trim() || '',
+            customer: element.querySelector('[data-customer], .customer-name')?.textContent?.trim() || '',
+            items: Array.from(element.querySelectorAll('[data-order-item], .order-item-detail')).map(item => ({
+              productId: item.getAttribute('data-product-id'),
+              name: item.querySelector('.item-name')?.textContent?.trim() || '',
+              quantity: item.querySelector('[data-quantity]')?.textContent?.trim() || '',
+              price: item.querySelector('[data-price]')?.textContent?.trim() || ''
+            })) || [],
+            shippingAddress: element.querySelector('[data-shipping-address], .shipping-address')?.textContent?.trim() || '',
+            trackingNumber: element.getAttribute('data-tracking-number') || element.querySelector('[data-tracking]')?.textContent?.trim() || ''
+          };
+          orders.push(order);
+        });
+
+        return orders;
+      });
+
+      console.log(`Scraped ${orders.length} orders`);
+      return orders;
+    } catch (error) {
+      console.error('Error scraping orders:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Scrape all data comprehensively
+   */
+  async scrapeAll(options = {}) {
+    try {
+      await this.initialize();
+
+      console.log('Starting comprehensive scrape of kmonstar.org...');
+
+      // Scrape products
+      const products = await this.scrapeProducts();
+
+      // Scrape detailed information for each product
+      const detailedProducts = [];
+      for (const product of products.slice(0, Math.min(products.length, options.maxProducts || 5))) {
+        if (product.url) {
+          const details = await this.scrapeProductDetails(product.url);
+          const variants = await this.scrapeVariants(product.url);
+          const stock = await this.scrapeStockLevels(product.url);
+
+          detailedProducts.push({
+            ...product,
+            details,
+            variants,
+            stock
+          });
+
+          // Add delay between requests to be respectful
+          await this.page.waitForTimeout(1000);
+        }
+      }
+
+      // Scrape orders if available
+      let orders = [];
+      if (options.scrapeOrders) {
+        try {
+          orders = await this.scrapeOrders(null, options.loginRequired);
+        } catch (error) {
+          console.warn('Could not scrape orders:', error.message);
+        }
+      }
+
+      const result = {
+        timestamp: new Date().toISOString(),
+        baseUrl: this.baseUrl,
+        summary: {
+          totalProducts: products.length,
+          detailedProducts: detailedProducts.length,
+          totalOrders: orders.length
+        },
+        products,
+        detailedProducts,
+        orders
+      };
+
+      console.log('Scraping completed successfully');
+      return result;
+    } catch (error) {
+      console.error('Error during comprehensive scrape:', error);
+      throw error;
+    } finally {
+      await this.close();
+    }
   }
 }
 
@@ -286,24 +312,20 @@ module.exports = KmonstarScraper;
 if (require.main === module) {
   (async () => {
     const scraper = new KmonstarScraper({ headless: true });
-    
+
     try {
-      await scraper.initialize();
-      
-      // Example: Scrape a single product
-      // const productData = await scraper.scrapeProduct('https://kmonstar.org/product/example');
-      // console.log('Scraped product:', JSON.stringify(productData, null, 2));
-      
-      // Example: Scrape product list and then all products
-      // const productUrls = await scraper.scrapeProductList('https://kmonstar.org/products');
-      // const allProducts = await scraper.scrapeMultipleProducts(productUrls);
-      // console.log('All products:', JSON.stringify(allProducts, null, 2));
-      
-      console.log('Scraper ready. Use this module in your application.');
+      // Example: Scrape everything
+      const data = await scraper.scrapeAll({
+        maxProducts: 10,
+        scrapeOrders: false,
+        loginRequired: false
+      });
+
+      console.log('\n=== Scraping Results ===');
+      console.log(JSON.stringify(data, null, 2));
     } catch (error) {
-      console.error('Scraper error:', error);
-    } finally {
-      await scraper.close();
+      console.error('Scraping failed:', error);
+      process.exit(1);
     }
   })();
 }
