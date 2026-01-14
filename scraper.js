@@ -1,330 +1,284 @@
+const puppeteer = require('puppeteer');
+const fs = require('fs');
+const path = require('path');
+
 /**
- * Web Scraper for kmonstar.org
- * Extracts product details, variants, stock levels, and orders using Puppeteer
+ * Web scraper for kmonstar.org
+ * Extracts product variants and stock levels using Puppeteer
  */
 
-const puppeteer = require('puppeteer');
-
 class KmonstarScraper {
-  constructor(options = {}) {
-    this.headless = options.headless !== false;
-    this.timeout = options.timeout || 30000;
-    this.baseUrl = 'https://kmonstar.org';
+  constructor() {
     this.browser = null;
     this.page = null;
+    this.baseUrl = 'https://kmonstar.org';
+    this.products = [];
   }
 
   /**
    * Initialize browser and page
    */
-  async initialize() {
+  async init() {
     try {
       this.browser = await puppeteer.launch({
-        headless: this.headless,
+        headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox']
       });
       this.page = await this.browser.newPage();
-      this.page.setDefaultTimeout(this.timeout);
+      this.page.setDefaultNavigationTimeout(30000);
       console.log('Browser initialized successfully');
     } catch (error) {
-      console.error('Failed to initialize browser:', error);
+      console.error('Error initializing browser:', error.message);
       throw error;
     }
   }
 
   /**
-   * Close browser and cleanup resources
+   * Navigate to a product page
+   * @param {string} productUrl - Full URL of the product
    */
-  async close() {
-    if (this.browser) {
-      await this.browser.close();
-      console.log('Browser closed');
-    }
-  }
-
-  /**
-   * Navigate to URL with retry logic
-   */
-  async navigateTo(url, retries = 3) {
-    for (let i = 0; i < retries; i++) {
-      try {
-        await this.page.goto(url, { waitUntil: 'networkidle2' });
-        return true;
-      } catch (error) {
-        console.warn(`Navigation attempt ${i + 1} failed:`, error.message);
-        if (i === retries - 1) throw error;
-        await this.page.waitForTimeout(1000);
-      }
-    }
-  }
-
-  /**
-   * Scrape all products from the catalog
-   */
-  async scrapeProducts(pageUrl = null) {
+  async navigateToProduct(productUrl) {
     try {
-      const url = pageUrl || `${this.baseUrl}/products`;
-      await this.navigateTo(url);
-
-      // Wait for product elements to load
-      await this.page.waitForSelector('[data-product-id], .product-item', { timeout: 5000 }).catch(() => null);
-
-      const products = await this.page.evaluate(() => {
-        const productElements = document.querySelectorAll('[data-product-id], .product-item');
-        const products = [];
-
-        productElements.forEach(element => {
-          const product = {
-            id: element.getAttribute('data-product-id') || element.getAttribute('id'),
-            name: element.querySelector('h2, .product-name, .title')?.textContent?.trim() || '',
-            price: element.querySelector('[data-price], .price')?.textContent?.trim() || '',
-            description: element.querySelector('[data-description], .description, .product-description')?.textContent?.trim() || '',
-            url: element.querySelector('a')?.href || '',
-            image: element.querySelector('img')?.src || '',
-            sku: element.getAttribute('data-sku') || element.querySelector('[data-sku]')?.textContent?.trim() || ''
-          };
-          products.push(product);
-        });
-
-        return products;
-      });
-
-      console.log(`Scraped ${products.length} products`);
-      return products;
+      await this.page.goto(productUrl, { waitUntil: 'networkidle2' });
+      console.log(`Navigated to: ${productUrl}`);
     } catch (error) {
-      console.error('Error scraping products:', error);
+      console.error(`Error navigating to ${productUrl}:`, error.message);
       throw error;
     }
   }
 
   /**
-   * Scrape detailed information for a specific product
+   * Extract product information including variants and stock levels
    */
-  async scrapeProductDetails(productUrl) {
+  async extractProductData() {
     try {
-      await this.navigateTo(productUrl);
-
-      const details = await this.page.evaluate(() => {
-        return {
-          title: document.querySelector('h1, .product-title')?.textContent?.trim() || '',
-          price: document.querySelector('[data-price], .product-price, .price')?.textContent?.trim() || '',
-          description: document.querySelector('[data-description], .product-description')?.textContent?.trim() || '',
-          sku: document.querySelector('[data-sku]')?.textContent?.trim() || '',
-          brand: document.querySelector('[data-brand], .brand')?.textContent?.trim() || '',
-          category: document.querySelector('[data-category], .category')?.textContent?.trim() || '',
-          rating: document.querySelector('[data-rating], .rating, .stars')?.textContent?.trim() || '',
-          reviews: document.querySelector('[data-reviews-count], .reviews-count')?.textContent?.trim() || '',
-          detailedDescription: document.querySelector('.detailed-description, [data-full-description]')?.textContent?.trim() || '',
-          weight: document.querySelector('[data-weight]')?.textContent?.trim() || '',
-          dimensions: document.querySelector('[data-dimensions]')?.textContent?.trim() || ''
+      const productData = await this.page.evaluate(() => {
+        const product = {
+          name: null,
+          price: null,
+          url: window.location.href,
+          variants: [],
+          stockLevel: null,
+          description: null,
+          images: [],
+          availability: null
         };
-      });
 
-      console.log(`Scraped details for product: ${details.title}`);
-      return details;
-    } catch (error) {
-      console.error('Error scraping product details:', error);
-      throw error;
-    }
-  }
+        // Extract product name
+        const nameElement = document.querySelector('h1, .product-name, [data-product-name]');
+        if (nameElement) {
+          product.name = nameElement.textContent.trim();
+        }
 
-  /**
-   * Scrape product variants (sizes, colors, etc.)
-   */
-  async scrapeVariants(productUrl) {
-    try {
-      await this.navigateTo(productUrl);
+        // Extract price
+        const priceElement = document.querySelector('.price, [data-price], .product-price');
+        if (priceElement) {
+          product.price = priceElement.textContent.trim();
+        }
 
-      const variants = await this.page.evaluate(() => {
-        const variantElements = document.querySelectorAll('[data-variant], .variant-option, .size-option, .color-option');
-        const variants = [];
+        // Extract description
+        const descElement = document.querySelector('.description, [data-description], .product-description');
+        if (descElement) {
+          product.description = descElement.textContent.trim();
+        }
 
-        variantElements.forEach(element => {
-          const variant = {
-            id: element.getAttribute('data-variant-id') || element.getAttribute('data-value'),
-            name: element.getAttribute('data-variant-name') || element.textContent?.trim() || '',
-            value: element.getAttribute('data-value') || element.getAttribute('value') || '',
-            type: element.getAttribute('data-variant-type') || element.className.includes('color') ? 'color' : 'size',
-            price: element.getAttribute('data-price') || '',
-            available: !element.classList.contains('disabled') && !element.classList.contains('out-of-stock')
+        // Extract variant information
+        const variantElements = document.querySelectorAll('[data-variant], .variant, .product-option');
+        variantElements.forEach((variant) => {
+          const variantInfo = {
+            name: variant.getAttribute('data-variant-name') || variant.textContent.split(':')[0]?.trim(),
+            options: [],
+            selected: variant.getAttribute('data-selected') || false
           };
-          variants.push(variant);
-        });
 
-        return variants;
-      });
-
-      console.log(`Scraped ${variants.length} variants`);
-      return variants;
-    } catch (error) {
-      console.error('Error scraping variants:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Scrape stock levels for products
-   */
-  async scrapeStockLevels(productUrl) {
-    try {
-      await this.navigateTo(productUrl);
-
-      const stock = await this.page.evaluate(() => {
-        return {
-          overall: document.querySelector('[data-stock], .stock, .inventory')?.textContent?.trim() || '',
-          status: document.querySelector('[data-stock-status], .stock-status')?.textContent?.trim() || '',
-          quantity: document.querySelector('[data-quantity], .quantity')?.textContent?.trim() || '',
-          variantStock: Array.from(document.querySelectorAll('[data-variant-stock], .variant-stock')).map(el => ({
-            variant: el.getAttribute('data-variant-name') || el.textContent?.trim(),
-            quantity: el.getAttribute('data-quantity') || ''
-          })) || []
-        };
-      });
-
-      console.log(`Scraped stock information`);
-      return stock;
-    } catch (error) {
-      console.error('Error scraping stock levels:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Scrape order information (requires authentication)
-   */
-  async scrapeOrders(ordersUrl = null, loginRequired = false) {
-    try {
-      const url = ordersUrl || `${this.baseUrl}/orders`;
-      
-      if (loginRequired) {
-        console.log('Note: Order scraping may require authentication');
-      }
-
-      await this.navigateTo(url);
-
-      // Wait for order elements
-      await this.page.waitForSelector('[data-order-id], .order-item, .order-row', { timeout: 5000 }).catch(() => null);
-
-      const orders = await this.page.evaluate(() => {
-        const orderElements = document.querySelectorAll('[data-order-id], .order-item, .order-row');
-        const orders = [];
-
-        orderElements.forEach(element => {
-          const order = {
-            id: element.getAttribute('data-order-id') || element.querySelector('.order-id')?.textContent?.trim() || '',
-            date: element.getAttribute('data-order-date') || element.querySelector('[data-date], .order-date')?.textContent?.trim() || '',
-            status: element.getAttribute('data-status') || element.querySelector('[data-status], .status, .order-status')?.textContent?.trim() || '',
-            total: element.querySelector('[data-total], .total, .order-total')?.textContent?.trim() || '',
-            customer: element.querySelector('[data-customer], .customer-name')?.textContent?.trim() || '',
-            items: Array.from(element.querySelectorAll('[data-order-item], .order-item-detail')).map(item => ({
-              productId: item.getAttribute('data-product-id'),
-              name: item.querySelector('.item-name')?.textContent?.trim() || '',
-              quantity: item.querySelector('[data-quantity]')?.textContent?.trim() || '',
-              price: item.querySelector('[data-price]')?.textContent?.trim() || ''
-            })) || [],
-            shippingAddress: element.querySelector('[data-shipping-address], .shipping-address')?.textContent?.trim() || '',
-            trackingNumber: element.getAttribute('data-tracking-number') || element.querySelector('[data-tracking]')?.textContent?.trim() || ''
-          };
-          orders.push(order);
-        });
-
-        return orders;
-      });
-
-      console.log(`Scraped ${orders.length} orders`);
-      return orders;
-    } catch (error) {
-      console.error('Error scraping orders:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Scrape all data comprehensively
-   */
-  async scrapeAll(options = {}) {
-    try {
-      await this.initialize();
-
-      console.log('Starting comprehensive scrape of kmonstar.org...');
-
-      // Scrape products
-      const products = await this.scrapeProducts();
-
-      // Scrape detailed information for each product
-      const detailedProducts = [];
-      for (const product of products.slice(0, Math.min(products.length, options.maxProducts || 5))) {
-        if (product.url) {
-          const details = await this.scrapeProductDetails(product.url);
-          const variants = await this.scrapeVariants(product.url);
-          const stock = await this.scrapeStockLevels(product.url);
-
-          detailedProducts.push({
-            ...product,
-            details,
-            variants,
-            stock
+          const optionElements = variant.querySelectorAll('.option, [data-option], li');
+          optionElements.forEach((option) => {
+            const optionData = {
+              value: option.textContent.trim(),
+              stock: option.getAttribute('data-stock') || 'Unknown',
+              available: !option.classList.contains('disabled') && !option.classList.contains('out-of-stock')
+            };
+            variantInfo.options.push(optionData);
           });
 
-          // Add delay between requests to be respectful
-          await this.page.waitForTimeout(1000);
+          if (variantInfo.options.length > 0) {
+            product.variants.push(variantInfo);
+          }
+        });
+
+        // Extract stock level
+        const stockElement = document.querySelector('[data-stock], .stock-level, .inventory');
+        if (stockElement) {
+          const stockText = stockElement.textContent.trim();
+          const stockMatch = stockText.match(/\d+/);
+          product.stockLevel = stockMatch ? parseInt(stockMatch[0]) : stockText;
         }
-      }
 
-      // Scrape orders if available
-      let orders = [];
-      if (options.scrapeOrders) {
-        try {
-          orders = await this.scrapeOrders(null, options.loginRequired);
-        } catch (error) {
-          console.warn('Could not scrape orders:', error.message);
+        // Extract availability status
+        const availabilityElement = document.querySelector('[data-availability], .availability, .stock-status');
+        if (availabilityElement) {
+          product.availability = availabilityElement.textContent.trim();
         }
-      }
 
-      const result = {
-        timestamp: new Date().toISOString(),
-        baseUrl: this.baseUrl,
-        summary: {
-          totalProducts: products.length,
-          detailedProducts: detailedProducts.length,
-          totalOrders: orders.length
-        },
-        products,
-        detailedProducts,
-        orders
-      };
+        // Extract images
+        const imageElements = document.querySelectorAll('img[src*="product"], .product-image img, [data-product-image]');
+        imageElements.forEach((img) => {
+          if (img.src) {
+            product.images.push(img.src);
+          }
+        });
 
-      console.log('Scraping completed successfully');
-      return result;
+        return product;
+      });
+
+      return productData;
     } catch (error) {
-      console.error('Error during comprehensive scrape:', error);
+      console.error('Error extracting product data:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Scrape multiple products
+   * @param {string[]} productUrls - Array of product URLs to scrape
+   */
+  async scrapeProducts(productUrls) {
+    try {
+      await this.init();
+
+      for (const url of productUrls) {
+        try {
+          await this.navigateToProduct(url);
+          const productData = await this.extractProductData();
+          this.products.push(productData);
+          console.log(`✓ Scraped: ${productData.name}`);
+        } catch (error) {
+          console.error(`Failed to scrape ${url}:`, error.message);
+        }
+      }
+
+      return this.products;
+    } catch (error) {
+      console.error('Error during scraping:', error.message);
       throw error;
     } finally {
       await this.close();
     }
   }
+
+  /**
+   * Scrape product listing page and extract product links
+   * @param {string} listingUrl - URL of the listing page
+   */
+  async scrapeProductListing(listingUrl) {
+    try {
+      await this.init();
+      await this.navigateToProduct(listingUrl);
+
+      const productLinks = await this.page.evaluate(() => {
+        const links = [];
+        const linkElements = document.querySelectorAll('a[href*="/products/"], .product-link, [data-product-link]');
+        linkElements.forEach((link) => {
+          const href = link.getAttribute('href');
+          if (href) {
+            links.push(href.startsWith('http') ? href : window.location.origin + href);
+          }
+        });
+        return [...new Set(links)]; // Remove duplicates
+      });
+
+      console.log(`Found ${productLinks.length} products on listing page`);
+      return productLinks;
+    } catch (error) {
+      console.error('Error scraping listing:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Save scraped data to JSON file
+   * @param {string} filename - Output filename
+   */
+  async saveData(filename = 'products.json') {
+    try {
+      const outputPath = path.join(__dirname, filename);
+      fs.writeFileSync(outputPath, JSON.stringify(this.products, null, 2));
+      console.log(`Data saved to ${outputPath}`);
+      return outputPath;
+    } catch (error) {
+      console.error('Error saving data:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Close browser
+   */
+  async close() {
+    try {
+      if (this.browser) {
+        await this.browser.close();
+        console.log('Browser closed');
+      }
+    } catch (error) {
+      console.error('Error closing browser:', error.message);
+    }
+  }
+
+  /**
+   * Get products with specific stock level
+   * @param {number} minStock - Minimum stock level
+   */
+  getProductsByStock(minStock = 0) {
+    return this.products.filter(product => {
+      if (typeof product.stockLevel === 'number') {
+        return product.stockLevel >= minStock;
+      }
+      return false;
+    });
+  }
+
+  /**
+   * Get available products (in stock)
+   */
+  getAvailableProducts() {
+    return this.products.filter(product => {
+      return product.availability?.toLowerCase().includes('in stock') ||
+             product.availability?.toLowerCase().includes('available') ||
+             (typeof product.stockLevel === 'number' && product.stockLevel > 0);
+    });
+  }
 }
 
-// Export the scraper class
+// Export for use as module
 module.exports = KmonstarScraper;
 
 // Example usage
 if (require.main === module) {
   (async () => {
-    const scraper = new KmonstarScraper({ headless: true });
-
+    const scraper = new KmonstarScraper();
+    
     try {
-      // Example: Scrape everything
-      const data = await scraper.scrapeAll({
-        maxProducts: 10,
-        scrapeOrders: false,
-        loginRequired: false
-      });
+      // Example: Scrape a single product
+      const singleProductUrl = 'https://kmonstar.org/products/example';
+      await scraper.init();
+      await scraper.navigateToProduct(singleProductUrl);
+      const productData = await scraper.extractProductData();
+      console.log('Product Data:', JSON.stringify(productData, null, 2));
+      await scraper.close();
 
-      console.log('\n=== Scraping Results ===');
-      console.log(JSON.stringify(data, null, 2));
+      // Example: Scrape multiple products
+      // const urls = ['url1', 'url2', 'url3'];
+      // const products = await scraper.scrapeProducts(urls);
+      // await scraper.saveData('kmonstar-products.json');
+
+      // Example: Scrape listing page
+      // const listingUrl = 'https://kmonstar.org/products';
+      // const productLinks = await scraper.scrapeProductListing(listingUrl);
+      // const allProducts = await scraper.scrapeProducts(productLinks);
+      // await scraper.saveData('all-products.json');
     } catch (error) {
-      console.error('Scraping failed:', error);
+      console.error('Script error:', error);
       process.exit(1);
     }
   })();
